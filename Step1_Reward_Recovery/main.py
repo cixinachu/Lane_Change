@@ -3,8 +3,11 @@ from torch.optim import Adam
 from torch import nn
 from ppo_model.PPO import PPO, RolloutBuffer
 from NGSIM_env.envs.env import NGSIMEnv
+from torch.utils.tensorboard import SummaryWriter
+import os
 import numpy as np
 import warnings
+from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
@@ -70,6 +73,12 @@ def run():
     env = NGSIMEnv(scene='us-101')
     env.generate_experts()
 
+    base_log_dir = os.path.join('runs', 'log','reward_recovery')
+    run_name = f"main1_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    log_dir = os.path.join(base_log_dir, run_name)
+    writer = SummaryWriter(log_dir=log_dir)
+    print(f">>> TensorBoard logging to: {log_dir}")
+
     buffer_exp = RolloutBuffer()
     buffer_exp.add_exp(path='expert_data.pkl')
 
@@ -132,6 +141,8 @@ def run():
 
             if done:
                 break
+
+        writer.add_scalar('episode/reward', current_ep_reward, i_episode)
 
         # IRL updating
         if i_episode % 150 == 0:
@@ -196,8 +207,8 @@ def run():
             # We don't use reward signals here,
             states_lcv, actions_lcv, dones_lcv, log_pis_lcv, next_states_lcv = model_lcv.buffer.get()
             states_fv, actions_fv, dones_fv, log_pis_fv, next_states_fv = model_fv.buffer.get()
-            # torch.save(model_lcv.buffer, 'lcv_buffer.pt')
-            # torch.save(model_fv.buffer, 'fv_buffer.pt')
+            torch.save(model_lcv.buffer, 'lcv_buffer.pt')
+            torch.save(model_fv.buffer, 'fv_buffer.pt')
             next_states_lcv = next_states_lcv.float()
             next_states_fv = next_states_fv.float()
             dones_lcv = dones_lcv.int().to('cuda')
@@ -213,28 +224,43 @@ def run():
                 model_lcv.buffer.rewards.append(sub_r)
             for sub_r in rewards_fv:
                 model_fv.buffer.rewards.append(sub_r)
+            disc_loss_mean = float(np.mean(epoch_disc_loss)) if len(epoch_disc_loss) > 0 else 0.0
+            acc_exp_lcv_mean = float(np.mean(acc_exp_lcv)) if len(acc_exp_lcv) > 0 else 0.0
+            acc_pi_lcv_mean = float(np.mean(acc_pi_lcv)) if len(acc_pi_lcv) > 0 else 0.0
+            acc_exp_fv_mean = float(np.mean(acc_exp_fv)) if len(acc_exp_fv) > 0 else 0.0
+            acc_pi_fv_mean = float(np.mean(acc_pi_fv)) if len(acc_pi_fv) > 0 else 0.0
+
             print('Epoch disc loss {:.4}, acc exp lcv {:.4}, acc pi lcv {:.4},'
-                  'acc exp fv {:.4}, acc pi fv {:.4}'.format(np.mean(epoch_disc_loss),
-                                                             np.mean(acc_exp_lcv), np.mean(acc_pi_lcv),
-                                                             np.mean(acc_exp_fv), np.mean(acc_pi_fv)))
+                  'acc exp fv {:.4}, acc pi fv {:.4}'.format(disc_loss_mean,
+                                                             acc_exp_lcv_mean, acc_pi_lcv_mean,
+                                                             acc_exp_fv_mean, acc_pi_fv_mean))
+
+            writer.add_scalar('disc/loss', disc_loss_mean, i_episode)
+            writer.add_scalar('disc/acc_exp_lcv', acc_exp_lcv_mean, i_episode)
+            writer.add_scalar('disc/acc_pi_lcv', acc_pi_lcv_mean, i_episode)
+            writer.add_scalar('disc/acc_exp_fv', acc_exp_fv_mean, i_episode)
+            writer.add_scalar('disc/acc_pi_fv', acc_pi_fv_mean, i_episode)
 
             # Update PPO
             model_lcv.update()
             model_fv.update()
             print('Episode {}, reward {:.4}, disc r lcv {:.4}, disc r fv {:.4}'.format(i_episode, current_ep_reward,
                                                                                        disc_reward_lcv, disc_reward_fv))
+            writer.add_scalar('disc/reward_lcv', disc_reward_lcv.item(), i_episode)
+            writer.add_scalar('disc/reward_fv', disc_reward_fv.item(), i_episode)
 
         i_episode += 1
         scene_id += 1
 
         if scene_id > 150:
             scene_id = 0
-            # torch.save(disc_lcv, 'disc_lcv.pt')
-            # torch.save(disc_fv, 'disc_fv.pt')
-            # torch.save(model_lcv, 'model_lcv.pt')
-            # torch.save(model_fv, 'model_fv.pt')
+            torch.save(disc_lcv, 'disc_lcv.pt')
+            torch.save(disc_fv, 'disc_fv.pt')
+            torch.save(model_lcv, 'model_lcv.pt')
+            torch.save(model_fv, 'model_fv.pt')
 
     env.close()
+    writer.close()
 
 
 if __name__ == '__main__':

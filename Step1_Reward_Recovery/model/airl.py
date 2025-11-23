@@ -161,3 +161,72 @@ class AIRL(PPO):
         #     print('loss disc {}'.format(loss_disc.item()))
 
         return loss_disc.item()
+
+
+# ==========================================
+# === 新增模块：社会势场与改进的判别器 ===
+# ==========================================
+
+
+class SocialPotentialNet(nn.Module):
+    def __init__(self, state_shape, hidden_units=[64, 64], hidden_activation=nn.ReLU(inplace=True)):
+        super().__init__()
+        layers = []
+        units = state_shape
+        for next_units in hidden_units:
+            layers.append(nn.Linear(units, next_units))
+            layers.append(hidden_activation)
+            units = next_units
+        layers.append(nn.Linear(units, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, states):
+        return self.net(states)
+
+
+class SocialAIRLDiscrim(nn.Module):
+    def __init__(self, state_shape, gamma, shared_phi_net,
+                 hidden_units_r=(64, 64),
+                 hidden_units_v=(64, 64),
+                 hidden_activation_r=nn.ReLU(inplace=True),
+                 hidden_activation_v=nn.ReLU(inplace=True)):
+        super().__init__()
+
+        self.gamma = gamma
+        self.shared_phi_net = shared_phi_net
+
+        self.private_g = build_mlp(
+            input_dim=state_shape,
+            output_dim=1,
+            hidden_units=hidden_units_r,
+            hidden_activation=hidden_activation_r
+        )
+
+        self.h = build_mlp(
+            input_dim=state_shape,
+            output_dim=1,
+            hidden_units=hidden_units_v,
+            hidden_activation=hidden_activation_v
+        )
+
+        self.alpha = nn.Parameter(torch.ones(1) * 1.0)
+
+    def get_reward(self, states):
+        phi = self.shared_phi_net(states)
+        epsilon = self.private_g(states)
+        return self.alpha * phi + epsilon, phi, epsilon
+
+    def f(self, states, dones, next_states):
+        rs, _, _ = self.get_reward(states)
+        vs = self.h(states)
+        next_vs = self.h(next_states)
+        return rs + self.gamma * (1 - dones.unsqueeze(-1)) * next_vs - vs
+
+    def forward(self, states, dones, log_pis, next_states):
+        exp_f = torch.exp(self.f(states, dones, next_states))
+        return exp_f / (exp_f + torch.exp(log_pis.unsqueeze(-1)))
+
+    def calculate_reward(self, states, dones, log_pis, next_states):
+        with torch.no_grad():
+            logits = self.forward(states, dones, log_pis, next_states)
+            return torch.log(logits + 1e-3) - torch.log((1 - logits) + 1e-3)
