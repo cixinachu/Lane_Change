@@ -1,6 +1,10 @@
 import copy
 import torch.nn as nn
 from utils.arrays import *
+from torch.utils.tensorboard import SummaryWriter  # TensorBoard 记录
+from pathlib import Path
+import os
+from datetime import datetime  # 补充 datetime 用于日志命名
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -167,6 +171,15 @@ def main():
     train_dataset = SequenceDataset(data_path, horizon=100)
     test_dataset = SequenceDataset(data_path, horizon=100, if_test=True)
 
+    # 基准路径与日志/模型目录
+    base_dir = Path(__file__).resolve().parent
+    time_str = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_dir = base_dir / "runs" / "planner_goal" / f"train_{time_str}"
+    writer = SummaryWriter(log_dir=str(log_dir))  # 统一记录所有指标
+    print(f">>> TensorBoard logging to: {log_dir}")
+    results_dir = log_dir / "results"  # 模型保存目录位于当前日志下
+    os.makedirs(results_dir, exist_ok=True)
+
     bound_min = torch.tensor([train_dataset.min_x, train_dataset.min_v]).to(device).float()
     bound_max = torch.tensor([train_dataset.max_x, train_dataset.max_v]).to(device).float()
 
@@ -178,7 +191,7 @@ def main():
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1000,
                                               num_workers=0, shuffle=False, pin_memory=True)
 
-    best_rmse = 1e6
+    best_rmse = 1e6  # 旧逻辑：只在达到最好指标时保存（恢复该逻辑）
     for epoch in range(100000):
         epoch_loss = []
         for batch in dataloader:
@@ -201,12 +214,21 @@ def main():
         test_x, test_v = evaluation(model, test_loader, bound_min, bound_max)
 
         print('Epoch {}, Training loss {:.4}, test x {:.4}, test v {:.4}'.format(epoch,
-                                                                                 np.mean(epoch_loss), test_x, test_v))
+                                                                                np.mean(epoch_loss), test_x, test_v))
 
+        # 记录到 TensorBoard，便于可视化
+        writer.add_scalar('train/loss', np.mean(epoch_loss), epoch)
+        writer.add_scalar('test/x_rmse', test_x, epoch)
+        writer.add_scalar('test/v_rmse', test_v, epoch)
+
+        # 仅在指标提升时保存最佳模型（恢复旧逻辑）；否则不覆盖
         if test_x < best_rmse:
             best_rmse = test_x
-            torch.save(model, 'goal_model.pth')
-            print('Best model saved!')
+            model_path = results_dir / "goal_model.pth"
+            torch.save(model, model_path)
+            print(f'Best model saved to {model_path} (x_rmse={test_x:.4f})')
+
+    writer.close()  # 训练结束关闭日志
 
 
 if __name__ == '__main__':

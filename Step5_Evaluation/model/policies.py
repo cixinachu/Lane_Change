@@ -4,7 +4,7 @@ import torch
 import einops
 import pdb
 
-from utils.arrays import *
+from Step5_Evaluation.utils.arrays import *
 # from diffusion.datasets.preprocessing import get_policy_preprocess_fn
 
 Trajectories = namedtuple('Trajectories', 'actions observations')

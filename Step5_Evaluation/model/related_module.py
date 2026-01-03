@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import pickle
 import numpy as np
+from pathlib import Path  # 路径处理，确保能定位 data/sample_data.pkl
 
 
 def normalize_obs(df):
@@ -32,7 +33,9 @@ def trajectory_process(trajectory, decision_time):
 
 
 def build_trajecotry():
-    with open('sample_data.pkl', "rb") as input_file:
+    # with open('sample_data.pkl', "rb") as input_file:  # 旧路径（依赖工作目录），已改为显式 data 路径
+    data_path = Path(__file__).resolve().parent.parent / "data" / "sample_data.pkl"
+    with open(data_path, "rb") as input_file:
         data = pickle.load(input_file)
 
     record_trajectory = {'lcv': [], 'fv': [], 'nlv': [], 'olv': []}

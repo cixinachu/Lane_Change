@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 import copy
 import numpy as np
-from model.gat_layer import DenseGATConv
+from Step5_Evaluation.model.gat_layer import DenseGATConv
 
 
 class Swish(nn.Module):

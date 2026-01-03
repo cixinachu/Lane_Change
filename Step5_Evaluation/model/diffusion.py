@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 import pdb
-from utils.progress import Progress, Silent
+from Step5_Evaluation.utils.progress import Progress, Silent
 from .posterior_mean_variance import get_mean_processor, get_var_processor
 from .helpers import (
     cosine_beta_schedule,

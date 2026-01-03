@@ -1,12 +1,9 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.optim import Adam
-import numpy as np
-from ppo_model.PPO import PPO
-# from gail_airl_ppo.network import AIRLDiscrim
 
 
+# --- 1. 基础组件 ---
 def build_mlp(input_dim, output_dim, hidden_units=[64, 64],
               hidden_activation=nn.Tanh(), output_activation=None):
     layers = []
@@ -21,6 +18,7 @@ def build_mlp(input_dim, output_dim, hidden_units=[64, 64],
     return nn.Sequential(*layers)
 
 
+# --- 2. 原始 AIRL 判别器 (用于标准模式) ---
 class AIRLDiscrim(nn.Module):
     def __init__(self, state_shape, gamma,
                  hidden_units_r=(64, 64),
@@ -48,128 +46,27 @@ class AIRLDiscrim(nn.Module):
         rs = self.g(states)
         vs = self.h(states)
         next_vs = self.h(next_states)
-        return rs + self.gamma * (1 - dones) * next_vs - vs
+        return rs + self.gamma * (1 - dones.unsqueeze(-1)) * next_vs - vs
 
     def forward(self, states, dones, log_pis, next_states):
-        # Discriminator's output is sigmoid(f - log_pi).
-        return self.f(states, dones, next_states) - log_pis
+        # 数值稳定的判别输出：sigmoid(f - log_pi)
+        logits = self.f(states, dones, next_states) - log_pis.unsqueeze(-1)
+        logits = torch.clamp(logits, -50.0, 50.0)
+        return torch.sigmoid(logits)
 
     def calculate_reward(self, states, dones, log_pis, next_states):
         with torch.no_grad():
             logits = self.forward(states, dones, log_pis, next_states)
-            return -F.logsigmoid(-logits)
+            return (torch.log(logits + 1e-3) - torch.log((1 - logits) + 1e-3))
 
 
-class AIRL(PPO):
-    def __init__(self, env, buffer_exp, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip,
-                 has_continuous_action_space, device, action_std_init=0.6, lr_disc=3e-4):
-        super().__init__(state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip,
-                         has_continuous_action_space, action_std_init=action_std_init)
-        self.env = env
-        # Expert's buffer.
-        self.buffer_exp = buffer_exp
-
-        # Discriminator.
-        self.disc = AIRLDiscrim(
-            state_shape=state_dim,
-            gamma=gamma,
-            hidden_units_r=(64, 64),
-            hidden_units_v=(64, 64),
-            hidden_activation_r=nn.ReLU(inplace=True),
-            hidden_activation_v=nn.ReLU(inplace=True)
-        ).to(device)
-        self.device = device
-        self.learning_steps_disc = 0
-        self.optim_disc = Adam(self.disc.parameters(), lr=lr_disc)
-        self.batch_size = 64
-        self.epoch_disc = 10
-
-    def train(self):
-        # Episode's timestep.
-        t = 0
-        # Initialize the environment.
-        state = self.env.reset(scene_id=0)
-
-        for step in range(1, 100):
-            # Pass to the algorithm to update state and episode timestep.
-            action = self.select_action(state) * 5
-            next_state, reward, done, info = self.env.step(action)
-
-            self.buffer.rewards.append(reward)
-            self.buffer.is_terminals.append(done)
-            self.buffer.next_states.append(torch.from_numpy(next_state.reshape(1, -1)).to(self.device))
-
-            # Update the algorithm whenever ready.
-            if step > 20:
-                self.update()
-            state = next_state
-            # # Evaluate regularly.
-            # if step % self.eval_interval == 0:
-            #     self.evaluate(step)
-
-    def update(self):
-        epoch_disc_loss = []
-        for _ in range(self.epoch_disc):
-            # Samples from current policy's trajectories.
-            states, _, _, dones, log_pis, next_states = self.buffer.sample(self.batch_size)
-            # Samples from expert's demonstrations.
-            states_exp, actions_exp, _, dones_exp, next_states_exp = self.buffer_exp.sample(self.batch_size)
-            states_exp = states_exp.float()
-            actions_exp = actions_exp.float()
-            next_states_exp = next_states_exp.float()
-            states = states.float()
-            next_states = next_states.float()
-            # Calculate log probabilities of expert actions.
-            with torch.no_grad():
-                log_pis_exp, _, _ = self.policy.evaluate(states_exp, actions_exp)
-            # Update discriminator.
-            sub_loss = self.update_disc(
-                                        states, dones, log_pis, next_states, states_exp,
-                                        dones_exp, log_pis_exp, next_states_exp
-                                    )
-            epoch_disc_loss.append(sub_loss)
-
-        print('Epoch disc loss {}'.format(np.mean(epoch_disc_loss)))
-        # We don't use reward signals here,
-        states, actions, _, dones, log_pis, next_states = self.buffer.get()
-        dones = dones.int().to(self.device)
-        # Calculate rewards.
-        rewards = self.disc.calculate_reward(states, dones, log_pis, next_states)
-
-        # Update PPO using estimated rewards.
-        self.update_ppo(states, actions, rewards, dones, log_pis, next_states)
-
-    def update_disc(self, states, dones, log_pis, next_states,
-                    states_exp, dones_exp, log_pis_exp,
-                    next_states_exp):
-        # Output of discriminator is (-inf, inf), not [0, 1].
-        dones = dones.int().to(self.device)
-        logits_pi = self.disc(states, dones, log_pis, next_states)
-        dones_exp = dones_exp.int().to(self.device)
-        logits_exp = self.disc(states_exp, dones_exp, log_pis_exp, next_states_exp)
-
-        # Discriminator is to maximize E_{\pi} [log(1 - D)] + E_{exp} [log(D)].
-        loss_pi = -F.logsigmoid(-logits_pi).mean()
-        loss_exp = -F.logsigmoid(logits_exp).mean()
-        loss_disc = loss_pi + loss_exp
-
-        self.optim_disc.zero_grad()
-        loss_disc.backward()
-        self.optim_disc.step()
-
-        # if self.learning_steps_disc % self.epoch_disc == 0:
-        #     print('loss disc {}'.format(loss_disc.item()))
-
-        return loss_disc.item()
-
-
-# ==========================================
-# === 新增模块：社会势场与改进的判别器 ===
-# ==========================================
-
-
+# --- 3. 新增：共享社会势场网络 (SocialPotential) ---
 class SocialPotentialNet(nn.Module):
-    def __init__(self, state_shape, hidden_units=[64, 64], hidden_activation=nn.ReLU(inplace=True)):
+    """
+    Helbing 椭圆势能版的共享势场网络，兼容旧版 MLP 势场并叠加显式势能项。
+    """
+    def __init__(self, state_shape, hidden_units=[64, 64], hidden_activation=nn.ReLU(inplace=True),
+                 A=1, B=8.0, rx=6.0, ry=2.0):
         super().__init__()
         layers = []
         units = state_shape
@@ -177,13 +74,46 @@ class SocialPotentialNet(nn.Module):
             layers.append(nn.Linear(units, next_units))
             layers.append(hidden_activation)
             units = next_units
-        layers.append(nn.Linear(units, 1))
+        layers.append(nn.Linear(units, 1))  # 输出标量势能 Phi
         self.net = nn.Sequential(*layers)
 
+        # Helbing 势场参数
+        self.A = A
+        self.B = B
+        # 与环境归一化保持一致：index0/4 为横向 ∈[0,25]，index1/5 为纵向 ∈[0,500]
+        self.norm_x = 25.0   # lateral
+        self.norm_y = 500.0  # longitudinal
+        self.rx = rx
+        self.ry = ry
+        self.lat_weight = self.rx / self.ry  # 横向距离放大倍率
+
+    def helbing_potential(self, states):
+        """
+        椭圆排斥势能：使用最新帧的相对 dx/dy（索引 4/5）。
+        """
+        latest = states[:, -16:]
+        dx_norm = latest[:, 4]  # FV 相对 LCV 的 Δx（横向）
+        dy_norm = latest[:, 5]  # FV 相对 LCV 的 Δy（纵向）
+
+        dx = dx_norm * self.norm_x
+        dy = dy_norm * self.norm_y
+
+        d_eff = torch.sqrt(dx ** 2 + (dy * self.lat_weight) ** 2 + 1e-6)
+        exponent = (self.rx - d_eff) / self.B
+        # 保护：防止指数爆炸
+        exponent = torch.clamp(exponent, max=10.0)
+        U = self.A * torch.exp(exponent)
+        # 二次保护：限制势能最大值
+        U = torch.clamp(U, 0.0, 5.0)
+        return -1.0 * U.unsqueeze(-1)
+
     def forward(self, states):
-        return self.net(states)
+        base_phi = self.net(states)
+        helbing_phi = self.helbing_potential(states)
+        return base_phi + helbing_phi
 
 
+# --- 4. 新增：支持势场分解的改进判别器 (SocialAIRLDiscrim) ---
 class SocialAIRLDiscrim(nn.Module):
     def __init__(self, state_shape, gamma, shared_phi_net,
                  hidden_units_r=(64, 64),
@@ -193,15 +123,18 @@ class SocialAIRLDiscrim(nn.Module):
         super().__init__()
 
         self.gamma = gamma
-        self.shared_phi_net = shared_phi_net
+        self.shared_phi_net = shared_phi_net  # 外部传入的共享网络实例
 
+        # 1. 私有偏好网络 (epsilon^i)
         self.private_g = build_mlp(
             input_dim=state_shape,
             output_dim=1,
             hidden_units=hidden_units_r,
-            hidden_activation=hidden_activation_r
+            hidden_activation=hidden_activation_r,
+            output_activation=None  # 去掉 ReLU，避免奖励恒为正导致判别器饱和
         )
 
+        # 2. 势能函数 V (用于 Advantage 估计)
         self.h = build_mlp(
             input_dim=state_shape,
             output_dim=1,
@@ -209,24 +142,49 @@ class SocialAIRLDiscrim(nn.Module):
             hidden_activation=hidden_activation_v
         )
 
-        self.alpha = nn.Parameter(torch.ones(1) * 1.0)
+        # 3. 可学习的权重 alpha (控制对社会势场的依赖程度)；初始较小，避免判别器过度依赖 Phi
+        self.alpha = nn.Parameter(torch.tensor(0.1))
 
     def get_reward(self, states):
+        # R_total = alpha * Phi(s) + epsilon(s)
         phi = self.shared_phi_net(states)
         epsilon = self.private_g(states)
-        return self.alpha * phi + epsilon, phi, epsilon
+        # return self.alpha * phi + epsilon, phi, epsilon
+        return epsilon, phi, epsilon
 
+    # def f(self, states, dones, next_states):
+    #     # AIRL 的核心：f(s,s') = g(s) + gamma * h(s') - h(s)
+    #     # 这里 g(s) 是复合奖励
+    #     rs, _, _ = self.get_reward(states)
+    #     vs = self.h(states)
+    #     next_vs = self.h(next_states)
+    #     # f 实际上近似于优势函数 A(s, a)
+    #     return rs + self.gamma * (1 - dones.unsqueeze(-1)) * next_vs - vs
     def f(self, states, dones, next_states):
-        rs, _, _ = self.get_reward(states)
+        # ---- 1. 计算私有 reward ----
+        rs, phi, epsilon = self.get_reward(states)
+
+        # ---- 2. 值函数 advantage 项 ----
         vs = self.h(states)
         next_vs = self.h(next_states)
-        return rs + self.gamma * (1 - dones.unsqueeze(-1)) * next_vs - vs
+
+        # ---- 3. 社会势差分项 beta*(next_phi - phi) ----
+        phi = self.shared_phi_net(states)
+        next_phi = self.shared_phi_net(next_states)
+        social_term = self.alpha * (next_phi - phi)  # α = β，可换名
+        # social_term = self.alpha * ( self.gamma * next_phi - phi )
+
+        # ---- 4. 合成 AIRL 的 f(s,a,s') ----
+        return rs + self.gamma * (1 - dones.unsqueeze(-1)) * next_vs - vs + social_term
 
     def forward(self, states, dones, log_pis, next_states):
-        exp_f = torch.exp(self.f(states, dones, next_states))
-        return exp_f / (exp_f + torch.exp(log_pis.unsqueeze(-1)))
+        # 数值稳定的判别输出：sigmoid(f - log_pi)
+        logits = self.f(states, dones, next_states) - log_pis.unsqueeze(-1)
+        logits = torch.clamp(logits, -50.0, 50.0)
+        return torch.sigmoid(logits)
 
     def calculate_reward(self, states, dones, log_pis, next_states):
+        # 用于 PPO 更新的伪奖励
         with torch.no_grad():
             logits = self.forward(states, dones, log_pis, next_states)
-            return torch.log(logits + 1e-3) - torch.log((1 - logits) + 1e-3)
+            return (torch.log(logits + 1e-3) - torch.log((1 - logits) + 1e-3))

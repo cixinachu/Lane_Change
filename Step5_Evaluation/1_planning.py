@@ -1,16 +1,27 @@
-import torch
-
-from model.temporal import TemporalUnet
-from model.diffusion import GaussianDiffusion
-from model.policies import Policy
-from utils.dataset import SequenceDataset
-from utils.arrays import *
+import os
+import sys
+from pathlib import Path
 import warnings
-from tqdm import tqdm
-from itertools import product
 import pickle
-import torch.nn as nn
+from itertools import product
+
 import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from torch.serialization import add_safe_globals  # 允许安全反序列化自定义类
+from torch.utils.tensorboard import SummaryWriter  # TensorBoard 记录
+from tqdm import tqdm
+
+# ensure project root (Diff-LC) is on sys.path for package imports
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from Step5_Evaluation.model.temporal import TemporalUnet
+from Step5_Evaluation.model.diffusion import GaussianDiffusion
+from Step5_Evaluation.model.policies import Policy
+from Step5_Evaluation.utils.dataset import SequenceDataset
+from Step5_Evaluation.utils.arrays import *
 warnings.filterwarnings('ignore')
 
 
@@ -66,6 +77,12 @@ def simulation(cond, planned_traj):
 
 
 device = 'cuda'
+# 统一日志/结果目录，优先使用 0_main 传入的环境变量
+log_dir = Path(os.environ.get("EVAL_LOG_DIR", Path(__file__).resolve().parent / "run" / "eval" / "debug"))
+results_dir = Path(os.environ.get("EVAL_RESULTS_DIR", log_dir / "results"))
+os.makedirs(results_dir, exist_ok=True)
+writer = SummaryWriter(log_dir=str(log_dir))
+
 model = TemporalUnet(horizon=100,
                      transition_dim=4+2,
                      dim=64,
@@ -93,9 +110,12 @@ dataset = SequenceDataset(data_path, horizon=100, if_test=True)
 diffusion_parm = torch.load(path)
 diffusion.load_state_dict(diffusion_parm['ema'])
 policy = Policy(diffusion, None)
-goal_predictor = torch.load(goal_path).to(device)
+# 安全加载目标预测器（权重可信前提下允许自定义类）
+add_safe_globals([GoalPredictor])
+goal_predictor = torch.load(goal_path, map_location=device, weights_only=False).to(device)
 
 all_data = {}
+total_candidates = 0  # 统计生成的规划候选数
 
 for traj_id in tqdm(range(53)):
     all_data[traj_id] = {}
@@ -143,9 +163,15 @@ for traj_id in tqdm(range(53)):
         plan_res[:, 0] += true_y[0, :]
         plan_res[:, 1] += true_x[0, :]
         all_data[traj_id]['planned'].append(plan_res)
+        total_candidates += 1
 
-with open('plan_data.pkl', 'wb') as path:
+with open(results_dir / 'plan_data.pkl', 'wb') as path:
     pickle.dump(all_data, path)
+
+# 简要记录到 TensorBoard，便于后续步骤查看
+writer.add_scalar('planning/num_traj', len(all_data), 0)
+writer.add_scalar('planning/num_candidates', total_candidates, 0)
+writer.close()
 
 
 

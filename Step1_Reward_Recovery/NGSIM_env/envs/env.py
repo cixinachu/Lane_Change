@@ -63,6 +63,7 @@ class NGSIMEnv(AbstractEnv):
         :param Dataframe df: observation data
         """
         self.features_range = [[0, 25], [0, 500], [-2*20, 2*20], [-2*20, 2*20], [-5, 5], [-2, 2]]
+        # self.features_range = [[0, 500], [0, 25], [-2*20, 2*20], [-2*20, 2*20], [-5, 5], [-2, 2]]
 
         for i, f_range in enumerate(self.features_range):
             df[i] = (df[i] - f_range[0]) / (f_range[1] - f_range[0])
@@ -261,7 +262,7 @@ class NGSIMEnv(AbstractEnv):
         """
         return self.steps > self.duration - 2
 
-    def generate_experts(self):
+    def generate_experts(self, save_path=None):
         expert_dict = {'state': [], 'action': [], 'rewards': [], 'dones': [], 'next_states': []}
 
         for scene_id in range(150):
@@ -289,7 +290,9 @@ class NGSIMEnv(AbstractEnv):
         expert_dict['dones'] = torch.from_numpy(np.concatenate(expert_dict['dones'])).reshape(-1, 1)
         expert_dict['next_states'] = torch.from_numpy(np.concatenate(expert_dict['next_states']))
 
-        with open('expert_data.pkl', 'wb') as path:
+        # 保存路径：如果外部传入则用外部，否则写到当前工作目录
+        out_path = save_path if save_path is not None else 'expert_data.pkl'
+        with open(out_path, 'wb') as path:
             pickle.dump(expert_dict, path)
 
 

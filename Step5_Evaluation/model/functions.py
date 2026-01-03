@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from model.helpers import (
+from Step5_Evaluation.model.helpers import (
     extract,
     apply_conditioning,
 )

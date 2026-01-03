@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" serverName="root@region-42.seetacloud.com:55690 password" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="root@region-42.seetacloud.com:33690 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/tmp/pycharm_project_259" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath path="/tmp/pycharm_project_259/Step1_Reward_Recovery/runs/log/reward_recovery" />
+            <excludedPath path="/tmp/pycharm_project_259/Step4_Predictor" />
+            <excludedPath path="/tmp/pycharm_project_259/Step2_Planner/runs/planner_dppo" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="root@region-42.seetacloud.com:55690 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/tmp/pycharm_project_489" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+  </component>
+</project>

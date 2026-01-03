@@ -33,16 +33,43 @@ class RolloutBuffer:
         return torch.concatenate(self.states), torch.concatenate(self.actions), \
                torch.tensor(self.is_terminals), torch.concatenate(self.logprobs), torch.concatenate(self.next_states)
 
-    def add_exp(self, path):
+    def _stack_history(self, tensor, history_len):
+        """
+        简单帧堆叠工具：将 (N, D) 转为 (N, history_len*D)，用首帧重复进行 padding。
+        """
+        if history_len <= 1:
+            return tensor
+        stacked = []
+        for i in range(tensor.shape[0]):
+            start = max(0, i - history_len + 1)
+            slice_ = tensor[start:i+1]
+            if slice_.shape[0] < history_len:
+                pad = tensor[0:1].repeat(history_len - slice_.shape[0], 1)
+                slice_ = torch.cat([pad, slice_], dim=0)
+            stacked.append(slice_.reshape(1, -1))
+        return torch.cat(stacked, dim=0)
+
+    def add_exp(self, path, use_history=False, history_len=1):
         with open(path, "rb") as input_file:
             tmp = pickle.load(input_file)
         self.device = device
 
-        self.states = tmp['state'].clone().to(self.device)
-        self.actions = tmp['action'].clone().to(self.device)
-        self.rewards = tmp['rewards'].clone().to(self.device)
-        self.is_terminals = tmp['dones'].clone().to(self.device)
-        self.next_states = tmp['next_states'].clone().to(self.device)
+        states = tmp['state'].clone().to(self.device)
+        actions = tmp['action'].clone().to(self.device)
+        rewards = tmp['rewards'].clone().to(self.device)
+        dones = tmp['dones'].clone().to(self.device)
+        next_states = tmp['next_states'].clone().to(self.device)
+
+        if use_history and history_len > 1:
+            # 对专家数据做帧堆叠，保证与训练时的历史形状一致
+            states = self._stack_history(states, history_len)
+            next_states = self._stack_history(next_states, history_len)
+
+        self.states = states
+        self.actions = actions
+        self.rewards = rewards
+        self.is_terminals = dones
+        self.next_states = next_states
 
     def sample(self, batch_size, if_exp=False):
         idxes = np.random.randint(low=0, high=len(self.actions), size=batch_size)
@@ -247,7 +274,8 @@ class PPO:
             
         # Normalizing the rewards
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+        # 防止梯度爆炸
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
 
         # convert list to tensor
         old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0)).detach().to(device)
